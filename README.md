@@ -1,6 +1,6 @@
 # Hyprshot-ocr
 
-Hyprshot-ocr is a fork of hyprshot, an utility to easily take screenshots in Hyprland, that adds easyocr text recognition option on top and auto-labeling based on hyprctl client title/class 
+Hyprshot-ocr is a fork of hyprshot, an utility to easily take screenshots in Hyprland, that adds easyocr text recognition option on top and auto-labeling based on hyprctl client title/class
 
 It allows taking screenshots of windows, regions and monitors which are saved to a folder of your choosing and copied to your clipboard. It can also OCR a selected region and copy the extracted text to your clipboard.
 
@@ -115,8 +115,10 @@ When you pass `--label`, Hyprshot appends an extra label to the filename:
 
 ## OCR language
 
-`hyprshot -m ocr` defaults to EasyOCR's `en` language model. You can override that by setting `HYPRSHOT_OCR_LANGS` to a comma-separated list such as:
+`hyprshot -m ocr` defaults to EasyOCR's `en` language model.
+
+To use a different language, pass `--ocr-lang`. The provided value replaces the default instead of being added to it:
 
 ```bash
-HYPRSHOT_OCR_LANGS=en,cn hyprshot -m ocr
+hyprshot -m ocr --ocr-lang pt
 ```

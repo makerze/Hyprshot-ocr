@@ -21,6 +21,7 @@ Options:
   -m, --mode                one of: output, window, region, ocr, active, OUTPUT_NAME
   -o, --output-folder       directory in which to save screenshot
   -f, --filename            the file name of the resulting screenshot
+  --ocr-lang                comma-separated OCR language list; defaults to en
   -l, --label               append a contextual label to the saved filename
   -D, --delay               how long to delay taking the screenshot after selection (seconds)
   -z, --freeze              freeze the screen on initialization
@@ -381,8 +382,10 @@ function run_ocr() {
         exit 1
     fi
 
+    local ocr_langs="${OCR_LANGS:-${HYPRSHOT_OCR_LANGS:-en}}"
+
     text_output="$(
-        HYPRSHOT_OCR_LANGS="${HYPRSHOT_OCR_LANGS:-en}" python3 - "$screenshot_path" <<'PY'
+        HYPRSHOT_OCR_LANGS="$ocr_langs" python3 - "$screenshot_path" <<'PY'
 import os
 import sys
 
@@ -537,7 +540,7 @@ function parse_mode() {
 }
 
 function args() {
-    local options=$(getopt -o hf:o:m:D:dszrlt: --long help,filename:,output-folder:,mode:,delay:,clipboard-only,debug,silent,freeze,raw,label,notif-timeout: -- "$@")
+    local options=$(getopt -o hf:o:m:D:dszrlt: --long help,filename:,output-folder:,mode:,ocr-lang:,delay:,clipboard-only,debug,silent,freeze,raw,label,notif-timeout: -- "$@")
     eval set -- "$options"
 
     while true; do
@@ -553,6 +556,10 @@ function args() {
             -f | --filename)
                 shift;
                 FILENAME=$1
+                ;;
+            --ocr-lang)
+                shift;
+                OCR_LANGS=$1
                 ;;
             -D | --delay)
 		shift;
@@ -613,6 +620,7 @@ CURRENT=0
 FREEZE=0
 COMMAND=()
 HYPRPICKER_PID=""
+OCR_LANGS=""
 [ -z "$XDG_PICTURES_DIR" ] && type xdg-user-dir &> /dev/null && XDG_PICTURES_DIR=$(xdg-user-dir PICTURES)
 FILENAME="$(date +'%Y-%m-%d-%H%M%S_hyprshot.png')"
 [ -z "$HYPRSHOT_DIR" ] && SAVEDIR=${XDG_PICTURES_DIR:=~} || SAVEDIR=${HYPRSHOT_DIR}
