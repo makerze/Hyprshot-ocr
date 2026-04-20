@@ -75,6 +75,18 @@ function send_ocr_notification() {
                 -t "$NOTIF_TIMEOUT" -a Hyprshot
 }
 
+function cleanup_freeze() {
+    if [ -n "${HYPRPICKER_PID:-}" ] && kill -0 "$HYPRPICKER_PID" >/dev/null 2>&1; then
+        kill "$HYPRPICKER_PID" >/dev/null 2>&1 || true
+        sleep 0.1
+        if kill -0 "$HYPRPICKER_PID" >/dev/null 2>&1; then
+            kill -9 "$HYPRPICKER_PID" >/dev/null 2>&1 || true
+        fi
+        wait "$HYPRPICKER_PID" 2>/dev/null || true
+    fi
+    HYPRPICKER_PID=""
+}
+
 function geometry_fields() {
     local geometry="${1}"
     local xy_str=$(echo "${geometry}" | cut -d' ' -f1)
@@ -399,20 +411,11 @@ PY
     send_ocr_notification
 }
 
-function checkRunning() {
-    sleep 1
-    while pgrep -x slurp >/dev/null 2>&1; do
-        sleep 0.1
-    done
-    pkill hyprpicker >/dev/null 2>&1 || true
-    exit
-}
-
 function begin_grab() {
-    if [ $FREEZE -eq 1 ] && [ "$(command -v "hyprpicker")" ] >/dev/null 2>&1; then
+    if [ $FREEZE -eq 1 ] && command -v hyprpicker >/dev/null 2>&1; then
         hyprpicker -r -z &
-        sleep 0.2
         HYPRPICKER_PID=$!
+        sleep 0.2
     fi
     local option=$1
     case $option in
@@ -609,6 +612,7 @@ NOTIF_TIMEOUT=5000
 CURRENT=0
 FREEZE=0
 COMMAND=()
+HYPRPICKER_PID=""
 [ -z "$XDG_PICTURES_DIR" ] && type xdg-user-dir &> /dev/null && XDG_PICTURES_DIR=$(xdg-user-dir PICTURES)
 FILENAME="$(date +'%Y-%m-%d-%H%M%S_hyprshot.png')"
 [ -z "$HYPRSHOT_DIR" ] && SAVEDIR=${XDG_PICTURES_DIR:=~} || SAVEDIR=${HYPRSHOT_DIR}
@@ -617,4 +621,5 @@ args "$@"
 
 SAVE_FULLPATH="$SAVEDIR/$FILENAME"
 [ $CLIPBOARD -eq 0 ] && Print "Saving in: %s\n" "$SAVE_FULLPATH"
-begin_grab $OPTION & checkRunning
+trap cleanup_freeze EXIT INT TERM
+begin_grab "$OPTION"
