@@ -14,12 +14,14 @@ Examples:
   capture a window                      \`hyprshot -m window\`
   capture active window to clipboard    \`hyprshot -m window -m active --clipboard-only\`
   capture selected monitor              \`hyprshot -m output -m DP-1\`
+  OCR selected region to clipboard      \`hyprshot -m ocr\`
 
 Options:
   -h, --help                show help message
-  -m, --mode                one of: output, window, region, active, OUTPUT_NAME
+  -m, --mode                one of: output, window, region, ocr, active, OUTPUT_NAME
   -o, --output-folder       directory in which to save screenshot
   -f, --filename            the file name of the resulting screenshot
+  -l, --label               append a contextual label to the saved filename
   -D, --delay               how long to delay taking the screenshot after selection (seconds)
   -z, --freeze              freeze the screen on initialization
   -d, --debug               print debug information
@@ -33,6 +35,7 @@ Modes:
   output        take screenshot of an entire monitor
   window        take screenshot of an open window
   region        take screenshot of selected region
+  ocr           OCR selected region and copy extracted text to clipboard
   active        take screenshot of active window|output
                 (you must use --mode again with the intended selection)
   OUTPUT_NAME   take screenshot of output with OUTPUT_NAME
@@ -60,6 +63,225 @@ function send_notification() {
     notify-send "Screenshot saved" \
                 "${message}" \
                 -t "$NOTIF_TIMEOUT" -i "${1}" -a Hyprshot
+}
+
+function send_ocr_notification() {
+    if [ $SILENT -eq 1 ]; then
+        return 0
+    fi
+
+    notify-send "OCR complete" \
+                "Extracted text copied to the clipboard." \
+                -t "$NOTIF_TIMEOUT" -a Hyprshot
+}
+
+function geometry_fields() {
+    local geometry="${1}"
+    local xy_str=$(echo "${geometry}" | cut -d' ' -f1)
+    local wh_str=$(echo "${geometry}" | cut -d' ' -f2)
+    local x=$(echo "${xy_str}" | cut -d',' -f1)
+    local y=$(echo "${xy_str}" | cut -d',' -f2)
+    local width=$(echo "${wh_str}" | cut -dx -f1)
+    local height=$(echo "${wh_str}" | cut -dx -f2)
+    printf "%s %s %s %s\n" "$x" "$y" "$width" "$height"
+}
+
+function sanitize_label() {
+    local label="${1}"
+    label=$(printf "%s" "$label" | tr '[:upper:]' '[:lower:]')
+    label=$(printf "%s" "$label" | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//; s/_+/_/g')
+    label=$(printf "%.40s" "$label")
+    label=$(printf "%s" "$label" | sed -E 's/_+$//')
+    printf "%s" "$label"
+}
+
+function title_label() {
+    local title="${1}"
+    local class_name="${2}"
+    local label=$(sanitize_label "$title")
+
+    if [ -z "$label" ]; then
+        label=$(sanitize_label "$class_name")
+    fi
+
+    printf "%s" "$label"
+}
+
+function center_point_for_geometry() {
+    local geometry="${1}"
+    read -r x y width height <<< "$(geometry_fields "$geometry")"
+    printf "%s %s\n" "$((x + width / 2))" "$((y + height / 2))"
+}
+
+function monitor_for_geometry() {
+    local geometry="${1}"
+    read -r point_x point_y <<< "$(center_point_for_geometry "$geometry")"
+
+    hyprctl -j monitors | jq -c \
+        --argjson point_x "$point_x" \
+        --argjson point_y "$point_y" '
+        first(
+            .[] |
+            select(
+                .x <= $point_x and
+                .y <= $point_y and
+                (
+                    .x +
+                    (
+                        if (.transform % 2 == 0) then
+                            (.width / .scale | round)
+                        else
+                            (.height / .scale | round)
+                        end
+                    )
+                ) > $point_x and
+                (
+                    .y +
+                    (
+                        if (.transform % 2 == 0) then
+                            (.height / .scale | round)
+                        else
+                            (.width / .scale | round)
+                        end
+                    )
+                ) > $point_y
+            )
+        ) // empty
+    '
+}
+
+function workspace_id_for_geometry() {
+    local geometry="${1}"
+    local monitor="$(monitor_for_geometry "$geometry")"
+
+    if [ -z "$monitor" ]; then
+        printf "%s" ""
+        return 0
+    fi
+
+    echo "$monitor" | jq -r '.activeWorkspace.id // empty'
+}
+
+function classes_label_for_geometry() {
+    local geometry="${1}"
+    local workspace_id="${2}"
+    read -r x y width height <<< "$(geometry_fields "$geometry")"
+
+    local classes="$(hyprctl -j clients | jq -r \
+        --arg workspace_id "$workspace_id" \
+        --argjson x "$x" \
+        --argjson y "$y" \
+        --argjson width "$width" \
+        --argjson height "$height" '
+        [
+            .[] |
+            select(
+                (.workspace.id | tostring) == $workspace_id and
+                (
+                    [0, ([.at[0] + .size[0], $x + $width] | min) - ([.at[0], $x] | max)] | max
+                ) * (
+                    [0, ([.at[1] + .size[1], $y + $height] | min) - ([.at[1], $y] | max)] | max
+                ) > 0
+            ) |
+            .class // empty
+        ] |
+        map(select(length > 0)) |
+        unique |
+        join("_")
+    ')"
+
+    sanitize_label "$classes"
+}
+
+function find_client_for_geometry() {
+    local geometry="${1}"
+    local workspace_id="${2}"
+    read -r x y width height <<< "$(geometry_fields "$geometry")"
+    local center_x=$((x + width / 2))
+    local center_y=$((y + height / 2))
+
+    hyprctl -j clients | jq -c \
+        --arg workspace_id "$workspace_id" \
+        --argjson x "$x" \
+        --argjson y "$y" \
+        --argjson width "$width" \
+        --argjson height "$height" \
+        --argjson center_x "$center_x" \
+        --argjson center_y "$center_y" '
+        map(
+            select((.workspace.id | tostring) == $workspace_id) |
+            . + {
+                contains_center: (
+                    .at[0] <= $center_x and
+                    .at[1] <= $center_y and
+                    (.at[0] + .size[0]) >= $center_x and
+                    (.at[1] + .size[1]) >= $center_y
+                ),
+                overlap_area: (
+                    [0, ([.at[0] + .size[0], $x + $width] | min) - ([.at[0], $x] | max)] | max
+                ) * (
+                    [0, ([.at[1] + .size[1], $y + $height] | min) - ([.at[1], $y] | max)] | max
+                )
+            }
+        )
+        | map(select(.overlap_area > 0))
+        | sort_by(.contains_center, .overlap_area)
+        | last // empty
+    '
+}
+
+function label_for_output_geometry() {
+    local geometry="${1}"
+    local workspace_id="$(workspace_id_for_geometry "$geometry")"
+    local classes_label="$(classes_label_for_geometry "$geometry" "$workspace_id")"
+
+    if [ -n "$classes_label" ]; then
+        printf "%s" "$classes_label"
+        return 0
+    fi
+
+    printf "%s" "output"
+}
+
+function label_for_geometry() {
+    local option="${1}"
+    local geometry="${2}"
+    local workspace_id="$(workspace_id_for_geometry "$geometry")"
+    local label=""
+
+    case "$option" in
+        output)
+            label="$(label_for_output_geometry "$geometry")"
+            ;;
+        window | region)
+            local client="$(find_client_for_geometry "$geometry" "$workspace_id")"
+            if [ -n "$client" ]; then
+                label="$(title_label \
+                    "$(echo "$client" | jq -r '.title // empty')" \
+                    "$(echo "$client" | jq -r '.class // empty')")"
+            fi
+            ;;
+    esac
+
+    printf "%s" "$label"
+}
+
+function append_label_to_filename() {
+    local filename="${1}"
+    local label="${2}"
+
+    if [ -z "$label" ]; then
+        printf "%s" "$filename"
+        return 0
+    fi
+
+    if [[ "$filename" == *.* ]]; then
+        local extension=".${filename##*.}"
+        local base="${filename%.*}"
+        printf "%s_%s%s" "$base" "$label" "$extension"
+    else
+        printf "%s_%s" "$filename" "$label"
+    fi
 }
 
 function trim() {
@@ -130,6 +352,53 @@ function save_geometry() {
     send_notification $output
 }
 
+function run_ocr() {
+    local geometry="${1}"
+    local screenshot_path="$(mktemp --suffix=.png)"
+    local text_output=""
+
+    cleanup_ocr() {
+        rm -f "$screenshot_path"
+    }
+    trap cleanup_ocr RETURN
+
+    grim -g "${geometry}" "$screenshot_path"
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf "python3 is required for OCR mode.\n" >&2
+        exit 1
+    fi
+
+    text_output="$(
+        HYPRSHOT_OCR_LANGS="${HYPRSHOT_OCR_LANGS:-en}" python3 - "$screenshot_path" <<'PY'
+import os
+import sys
+
+try:
+    import easyocr
+except ImportError:
+    print("EasyOCR is not installed. Install the Python easyocr package to use OCR mode.", file=sys.stderr)
+    sys.exit(1)
+
+image_path = sys.argv[1]
+languages = [lang.strip() for lang in os.environ.get("HYPRSHOT_OCR_LANGS", "en").split(",") if lang.strip()]
+reader = easyocr.Reader(languages, verbose=False)
+result = reader.readtext(image_path, detail=0, paragraph=True)
+text = "\n".join(chunk.strip() for chunk in result if chunk.strip())
+sys.stdout.write(text)
+PY
+    )"
+
+    if [ -z "$text_output" ]; then
+        printf "No text detected in selected region.\n" >&2
+        exit 1
+    fi
+
+    printf "%s" "$text_output" | wl-copy --type text/plain
+    printf "%s\n" "$text_output"
+    send_ocr_notification
+}
+
 function checkRunning() {
     sleep 1
     while [[ 1 == 1 ]]; do
@@ -160,6 +429,9 @@ function begin_grab() {
         region)
             local geometry=`grab_region`
             ;;
+        ocr)
+            local geometry=`grab_region`
+            ;;
         window)
             if [ $CURRENT -eq 1 ]; then
                 local geometry=`grab_active_window`
@@ -172,7 +444,20 @@ function begin_grab() {
     if [ ${DELAY} -gt 0 ] 2>/dev/null; then
         sleep ${DELAY}
     fi
-    save_geometry "${geometry}"
+
+    if [ $LABEL -eq 1 ] && [ "$option" != "ocr" ]; then
+        local label="$(label_for_geometry "$option" "$geometry")"
+        if [ -n "$label" ]; then
+            SAVE_FULLPATH="$SAVEDIR/$(append_label_to_filename "$FILENAME" "$label")"
+            Print "Using labeled filename: %s\n" "$SAVE_FULLPATH"
+        fi
+    fi
+
+    if [ "$option" = "ocr" ]; then
+        run_ocr "${geometry}"
+    else
+        save_geometry "${geometry}"
+    fi
 }
 
 function grab_output() {
@@ -222,7 +507,7 @@ function parse_mode() {
     local mode="${1}"
 
     case $mode in
-        window | region | output)
+        window | region | output | ocr)
             OPTION=$mode
             ;;
         active)
@@ -236,7 +521,7 @@ function parse_mode() {
 }
 
 function args() {
-    local options=$(getopt -o hf:o:m:D:dszr:t: --long help,filename:,output-folder:,mode:,delay:,clipboard-only,debug,silent,freeze,raw,notif-timeout: -- "$@")
+    local options=$(getopt -o hf:o:m:D:dszrlt: --long help,filename:,output-folder:,mode:,delay:,clipboard-only,debug,silent,freeze,raw,label,notif-timeout: -- "$@")
     eval set -- "$options"
 
     while true; do
@@ -276,6 +561,9 @@ function args() {
             -r | --raw)
                 RAW=1
                 ;;
+            -l | --label)
+                LABEL=1
+                ;;
             -t | --notif-timeout)
                 shift;
                 NOTIF_TIMEOUT=$1
@@ -289,7 +577,7 @@ function args() {
     done
 
     if [ -z $OPTION ]; then
-        Print "A mode is required\n\nAvailable modes are:\n\toutput\n\tregion\n\twindow\n"
+        Print "A mode is required\n\nAvailable modes are:\n\toutput\n\tregion\n\twindow\n\tocr\n"
         exit 2
     fi
 }
@@ -303,6 +591,7 @@ CLIPBOARD=0
 DEBUG=0
 SILENT=0
 RAW=0
+LABEL=0
 NOTIF_TIMEOUT=5000
 CURRENT=0
 FREEZE=0
