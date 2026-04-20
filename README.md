@@ -1,4 +1,4 @@
-# Hyprshot
+# Hyprshot-ocr
 
 Hyprshot-ocr is a fork of hyprshot, an utility to easily take screenshots in Hyprland, that adds easyocr text recognition option on top and auto-labeling based on hyprctl client title/class 
 
